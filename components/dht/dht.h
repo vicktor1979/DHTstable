@@ -38,6 +38,11 @@ class DHT final : public PollingComponent {
   void update() override;
 
  protected:
+  static constexpr uint8_t MAX_READ_ATTEMPTS = 3;
+  static constexpr uint32_t RETRY_DELAY_MS = 2200;
+
+  void read_attempt_(uint8_t attempt);
+  void publish_reading_(float temperature, float humidity, uint8_t attempt);
   bool read_sensor_(float *temperature, float *humidity, bool report_errors);
 
   sensor::Sensor *temperature_sensor_{nullptr};
@@ -46,6 +51,7 @@ class DHT final : public PollingComponent {
 
   DHTModel model_{DHT_MODEL_AUTO_DETECT};
   bool is_auto_detect_{false};
+  bool retry_in_progress_{false};
 
   DHTStable dht_stable_;
 };
