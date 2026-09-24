@@ -34,8 +34,8 @@ void DHT::dump_config() {
                 this->model_ == DHT_MODEL_DHT11 ? LOG_STR_LITERAL("DHT11")
                                                 : LOG_STR_LITERAL("DHT22 or equivalent"),
                 ONOFF(this->t_pin_->get_flags() & gpio::FLAG_PULLUP),
-                MAX_READ_ATTEMPTS,
-                RETRY_DELAY_MS);
+                static_cast<unsigned>(MAX_READ_ATTEMPTS),
+                static_cast<unsigned long>(RETRY_DELAY_MS));
 
   LOG_PIN("  Pin: ", this->t_pin_);
   LOG_UPDATE_INTERVAL(this);
@@ -74,10 +74,10 @@ void DHT::read_attempt_(uint8_t attempt) {
 
   if (attempt < MAX_READ_ATTEMPTS) {
     ESP_LOGD(TAG,
-             "DHT read failed (attempt %u/%u), retrying in %u ms",
-             attempt,
-             MAX_READ_ATTEMPTS,
-             RETRY_DELAY_MS);
+             "DHT read failed (attempt %u/%u), retrying in %lu ms",
+             static_cast<unsigned>(attempt),
+             static_cast<unsigned>(MAX_READ_ATTEMPTS),
+             static_cast<unsigned long>(RETRY_DELAY_MS));
 
     this->set_timeout("dht_retry", RETRY_DELAY_MS, [this, attempt]() {
       this->read_attempt_(attempt + 1);
