@@ -3,6 +3,8 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
+#include <cmath>
+
 namespace esphome::dht {
 
 static const char *const TAG = "dht";
@@ -17,9 +19,7 @@ void DHT::setup() {
   const bool pullup = (this->t_pin_->get_flags() & gpio::FLAG_PULLUP) != 0;
   this->dht_stable_.setPullup(pullup);
 
-  // DHTStable can disable IRQs for the complete transaction, including
-  // the sensor wake-up delay. Keep this disabled to avoid long IRQ-off
-  // periods, especially with DHT11.
+  // Avoid disabling IRQs for the whole DHT transaction.
   this->dht_stable_.setDisableIRQ(false);
 }
 
@@ -45,7 +45,7 @@ void DHT::update() {
   bool success;
 
   if (this->model_ == DHT_MODEL_AUTO_DETECT) {
-    // Match ESPHome's normal behaviour: try DHT22 first.
+    // Try DHT22 first.
     this->model_ = DHT_MODEL_DHT22;
     success = this->read_sensor_(&temperature, &humidity, false);
 
@@ -67,14 +67,10 @@ void DHT::update() {
 
     this->status_clear_warning();
   } else {
-    ESP_LOGW(TAG, "Invalid readings");
-
-    if (this->temperature_sensor_ != nullptr)
-      this->temperature_sensor_->publish_state(NAN);
-
-    if (this->humidity_sensor_ != nullptr)
-      this->humidity_sensor_->publish_state(NAN);
-
+    // IMPORTANT:
+    // Do NOT publish NAN on a failed read.
+    // This keeps the last successfully published value in ESPHome/Home Assistant.
+    ESP_LOGW(TAG, "Invalid reading - keeping previous values");
     this->status_set_warning();
   }
 }
@@ -123,8 +119,18 @@ bool DHT::read_sensor_(float *temperature, float *humidity, bool report_errors) 
     return false;
   }
 
-  *temperature = this->dht_stable_.getTemperature();
-  *humidity = this->dht_stable_.getHumidity();
+  const float new_temperature = this->dht_stable_.getTemperature();
+  const float new_humidity = this->dht_stable_.getHumidity();
+
+  // Even if the library returns OK, never publish non-finite values.
+  if (!std::isfinite(new_temperature) || !std::isfinite(new_humidity)) {
+    if (report_errors)
+      ESP_LOGW(TAG, "DHTStable returned non-finite value - keeping previous values");
+    return false;
+  }
+
+  *temperature = new_temperature;
+  *humidity = new_humidity;
 
   ESP_LOGV(TAG, "DHTStable read: %.2f °C, %.2f %%", *temperature, *humidity);
   return true;
