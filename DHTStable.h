@@ -59,11 +59,14 @@ public:
 
   bool  getDisableIRQ()            { return _disableIRQ; };
   void  setDisableIRQ(bool b )     { _disableIRQ = b; };
+  bool  getPullup()                { return _pullup; };
+  void  setPullup(bool b)          { _pullup = b; };
 
 private:
   uint8_t _bits[5];  //  buffer to receive data
   int     _readSensor(uint8_t pin, uint8_t wakeupDelay);
   bool    _disableIRQ = false;
+  bool    _pullup = false;
   float   _humidity;
   float   _temperature;
 };
