@@ -29,7 +29,7 @@ void DHT::dump_config() {
                 "  %sModel: %s\n"
                 "  Internal pull-up: %s\n"
                 "  Read attempts: %u\n"
-                "  Retry delay: %u ms",
+                "  Retry delay: %lu ms",
                 this->is_auto_detect_ ? LOG_STR_LITERAL("Auto-detected ") : "",
                 this->model_ == DHT_MODEL_DHT11 ? LOG_STR_LITERAL("DHT11")
                                                 : LOG_STR_LITERAL("DHT22 or equivalent"),
@@ -91,7 +91,7 @@ void DHT::read_attempt_(uint8_t attempt) {
   // Do not publish NAN, because Home Assistant would show Unknown.
   ESP_LOGW(TAG,
            "DHT read failed after %u attempts - keeping previous values",
-           MAX_READ_ATTEMPTS);
+           static_cast<unsigned>(MAX_READ_ATTEMPTS));
 
   this->status_set_warning();
 
@@ -109,8 +109,8 @@ void DHT::publish_reading_(float temperature, float humidity, uint8_t attempt) {
   if (attempt > 1) {
     ESP_LOGD(TAG,
              "DHT read succeeded on attempt %u/%u",
-             attempt,
-             MAX_READ_ATTEMPTS);
+             static_cast<unsigned>(attempt),
+             static_cast<unsigned>(MAX_READ_ATTEMPTS));
   }
 
   if (this->temperature_sensor_ != nullptr)
