@@ -24,6 +24,7 @@ void DHTStable::reset()
   _temperature = 0.0;
   _humidity = 0.0;
   _disableIRQ = false;
+  _pullup = false;
 }
 
 
@@ -124,7 +125,7 @@ int DHTStable::_readSensor(uint8_t pin, uint8_t wakeupDelay)
   pinMode(pin, OUTPUT);
   digitalWrite(pin, LOW);
   delay(wakeupDelay);
-  pinMode(pin, INPUT);
+  pinMode(pin, _pullup ? INPUT_PULLUP : INPUT);
   delayMicroseconds(40);
 
   //  GET ACKNOWLEDGE or TIMEOUT
