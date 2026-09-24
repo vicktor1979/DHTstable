@@ -28,13 +28,17 @@ void DHT::dump_config() {
                 "DHTStable:\n"
                 "  %sModel: %s\n"
                 "  Internal pull-up: %s\n"
-                "  Read attempts: %u\n"
+                "  Max read attempts: %u\n"
+                "  Max timeout attempts: %u\n"
+                "  Offline after timeout cycles: %u\n"
                 "  Retry delay: %lu ms",
                 this->is_auto_detect_ ? LOG_STR_LITERAL("Auto-detected ") : "",
                 this->model_ == DHT_MODEL_DHT11 ? LOG_STR_LITERAL("DHT11")
                                                 : LOG_STR_LITERAL("DHT22 or equivalent"),
                 ONOFF(this->t_pin_->get_flags() & gpio::FLAG_PULLUP),
                 static_cast<unsigned>(MAX_READ_ATTEMPTS),
+                static_cast<unsigned>(MAX_TIMEOUT_ATTEMPTS),
+                static_cast<unsigned>(OFFLINE_AFTER_TIMEOUT_CYCLES),
                 static_cast<unsigned long>(RETRY_DELAY_MS));
 
   LOG_PIN("  Pin: ", this->t_pin_);
@@ -63,20 +67,42 @@ void DHT::read_attempt_(uint8_t attempt) {
   float temperature = NAN;
   float humidity = NAN;
 
-  // Only print the low-level DHTStable error on the final attempt.
-  const bool report_errors = attempt >= MAX_READ_ATTEMPTS;
-  const bool success = this->read_sensor_(&temperature, &humidity, report_errors);
+  // In offline mode there is deliberately only one probe per update interval.
+  const bool report_errors = this->sensor_offline_ || attempt >= MAX_READ_ATTEMPTS;
+  const ReadStatus status = this->read_sensor_(&temperature, &humidity, report_errors);
 
-  if (success) {
+  if (status == ReadStatus::OK) {
     this->publish_reading_(temperature, humidity, attempt);
     return;
   }
 
-  if (attempt < MAX_READ_ATTEMPTS) {
+  if (this->sensor_offline_) {
+    // One lightweight presence probe only. Keep the last known good value.
+    this->retry_in_progress_ = false;
+
+    if (status == ReadStatus::TIMEOUT) {
+      ESP_LOGD(TAG, "DHT sensor still offline - keeping previous values");
+    } else {
+      // A non-timeout response means the device/data line is responding again.
+      // Leave offline mode so the next normal update gets the full retry policy.
+      this->sensor_offline_ = false;
+      this->consecutive_timeout_cycles_ = 0;
+      ESP_LOGI(TAG, "DHT sensor is responding again - normal retry mode restored");
+    }
+
+    this->status_set_warning();
+    return;
+  }
+
+  // Timeout usually means no response at all. Retry it only once.
+  const uint8_t max_attempts =
+      status == ReadStatus::TIMEOUT ? MAX_TIMEOUT_ATTEMPTS : MAX_READ_ATTEMPTS;
+
+  if (attempt < max_attempts) {
     ESP_LOGD(TAG,
              "DHT read failed (attempt %u/%u), retrying in %lu ms",
              static_cast<unsigned>(attempt),
-             static_cast<unsigned>(MAX_READ_ATTEMPTS),
+             static_cast<unsigned>(max_attempts),
              static_cast<unsigned long>(RETRY_DELAY_MS));
 
     this->set_timeout("dht_retry", RETRY_DELAY_MS, [this, attempt]() {
@@ -85,17 +111,38 @@ void DHT::read_attempt_(uint8_t attempt) {
     return;
   }
 
+  this->finish_failed_cycle_(status, attempt);
+}
+
+void DHT::finish_failed_cycle_(ReadStatus status, uint8_t attempt) {
   this->retry_in_progress_ = false;
 
-  // Keep the last successfully published values.
-  // Do not publish NAN, because Home Assistant would show Unknown.
-  ESP_LOGW(TAG,
-           "DHT read failed after %u attempts - keeping previous values",
-           static_cast<unsigned>(MAX_READ_ATTEMPTS));
+  if (status == ReadStatus::TIMEOUT) {
+    if (this->consecutive_timeout_cycles_ < 255)
+      this->consecutive_timeout_cycles_++;
+
+    ESP_LOGW(TAG,
+             "DHT timeout cycle %u/%u - keeping previous values",
+             static_cast<unsigned>(this->consecutive_timeout_cycles_),
+             static_cast<unsigned>(OFFLINE_AFTER_TIMEOUT_CYCLES));
+
+    if (this->consecutive_timeout_cycles_ >= OFFLINE_AFTER_TIMEOUT_CYCLES) {
+      this->sensor_offline_ = true;
+      ESP_LOGW(TAG,
+               "DHT sensor appears offline - only one probe will be made per update interval");
+    }
+  } else {
+    // It did respond, so it is not considered physically absent.
+    this->consecutive_timeout_cycles_ = 0;
+
+    ESP_LOGW(TAG,
+             "DHT read failed after %u attempts - keeping previous values",
+             static_cast<unsigned>(attempt));
+  }
 
   this->status_set_warning();
 
-  // Preserve the old AUTO_DETECT behaviour: after repeated DHT22 failures,
+  // Preserve AUTO_DETECT behaviour: after a failed DHT22 cycle,
   // try DHT11 timing on the next regular polling cycle.
   if (this->is_auto_detect_ && this->model_ == DHT_MODEL_DHT22) {
     ESP_LOGW(TAG, "Auto-detect: switching to DHT11 timing for next update");
@@ -106,12 +153,17 @@ void DHT::read_attempt_(uint8_t attempt) {
 void DHT::publish_reading_(float temperature, float humidity, uint8_t attempt) {
   this->retry_in_progress_ = false;
 
-  if (attempt > 1) {
+  if (this->sensor_offline_) {
+    ESP_LOGI(TAG, "DHT sensor recovered");
+  } else if (attempt > 1) {
     ESP_LOGD(TAG,
              "DHT read succeeded on attempt %u/%u",
              static_cast<unsigned>(attempt),
              static_cast<unsigned>(MAX_READ_ATTEMPTS));
   }
+
+  this->sensor_offline_ = false;
+  this->consecutive_timeout_cycles_ = 0;
 
   if (this->temperature_sensor_ != nullptr)
     this->temperature_sensor_->publish_state(temperature);
@@ -127,7 +179,7 @@ void DHT::set_dht_model(DHTModel model) {
   this->is_auto_detect_ = model == DHT_MODEL_AUTO_DETECT;
 }
 
-bool DHT::read_sensor_(float *temperature, float *humidity, bool report_errors) {
+DHT::ReadStatus DHT::read_sensor_(float *temperature, float *humidity, bool report_errors) {
   *temperature = NAN;
   *humidity = NAN;
 
@@ -154,16 +206,22 @@ bool DHT::read_sensor_(float *temperature, float *humidity, bool report_errors) 
   }
 
   if (result != DHTLIB_OK) {
-    if (report_errors) {
-      if (result == DHTLIB_ERROR_CHECKSUM) {
-        ESP_LOGW(TAG, "DHTStable checksum error");
-      } else if (result == DHTLIB_ERROR_TIMEOUT) {
+    if (result == DHTLIB_ERROR_TIMEOUT) {
+      if (report_errors)
         ESP_LOGW(TAG, "DHTStable timeout");
-      } else {
-        ESP_LOGW(TAG, "DHTStable error: %d", result);
-      }
+      return ReadStatus::TIMEOUT;
     }
-    return false;
+
+    if (result == DHTLIB_ERROR_CHECKSUM) {
+      if (report_errors)
+        ESP_LOGW(TAG, "DHTStable checksum error");
+      return ReadStatus::CHECKSUM;
+    }
+
+    if (report_errors)
+      ESP_LOGW(TAG, "DHTStable error: %d", result);
+
+    return ReadStatus::OTHER_ERROR;
   }
 
   const float new_temperature = this->dht_stable_.getTemperature();
@@ -171,10 +229,9 @@ bool DHT::read_sensor_(float *temperature, float *humidity, bool report_errors) 
 
   // Never publish NaN/Inf even if the library returned DHTLIB_OK.
   if (!std::isfinite(new_temperature) || !std::isfinite(new_humidity)) {
-    if (report_errors) {
+    if (report_errors)
       ESP_LOGW(TAG, "DHTStable returned non-finite value");
-    }
-    return false;
+    return ReadStatus::INVALID_VALUE;
   }
 
   *temperature = new_temperature;
@@ -184,7 +241,8 @@ bool DHT::read_sensor_(float *temperature, float *humidity, bool report_errors) 
            "DHTStable read: %.2f °C, %.2f %%",
            *temperature,
            *humidity);
-  return true;
+
+  return ReadStatus::OK;
 }
 
 }  // namespace esphome::dht

@@ -39,11 +39,22 @@ class DHT final : public PollingComponent {
 
  protected:
   static constexpr uint8_t MAX_READ_ATTEMPTS = 3;
+  static constexpr uint8_t MAX_TIMEOUT_ATTEMPTS = 2;
+  static constexpr uint8_t OFFLINE_AFTER_TIMEOUT_CYCLES = 3;
   static constexpr uint32_t RETRY_DELAY_MS = 2200;
+
+  enum class ReadStatus : uint8_t {
+    OK = 0,
+    TIMEOUT,
+    CHECKSUM,
+    INVALID_VALUE,
+    OTHER_ERROR,
+  };
 
   void read_attempt_(uint8_t attempt);
   void publish_reading_(float temperature, float humidity, uint8_t attempt);
-  bool read_sensor_(float *temperature, float *humidity, bool report_errors);
+  void finish_failed_cycle_(ReadStatus status, uint8_t attempt);
+  ReadStatus read_sensor_(float *temperature, float *humidity, bool report_errors);
 
   sensor::Sensor *temperature_sensor_{nullptr};
   sensor::Sensor *humidity_sensor_{nullptr};
@@ -52,6 +63,9 @@ class DHT final : public PollingComponent {
   DHTModel model_{DHT_MODEL_AUTO_DETECT};
   bool is_auto_detect_{false};
   bool retry_in_progress_{false};
+  bool sensor_offline_{false};
+
+  uint8_t consecutive_timeout_cycles_{0};
 
   DHTStable dht_stable_;
 };
